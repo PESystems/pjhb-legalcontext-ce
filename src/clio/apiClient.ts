@@ -61,10 +61,6 @@ export interface PaginatedResponse<T> {
   };
 }
 
-// Track authentication status to avoid repetitive failures
-let isAuthenticated = false;
-let authenticationFailed = false;
-
 /**
  * Determines if a document is processable based on its content type
  */
@@ -100,6 +96,11 @@ export class ClioApiClient {
   private tokens: ClioTokens | null = null;
   private baseUrl: string;
   private requestTimestamps: number[] = [];
+  // Per-instance authentication state. Pre-Pass-6a these were module-level
+  // globals, making the module multi-tenant unsafe (auth state leaked across
+  // ClioApiClient instances). Per Pass 5 W2 F2 / Pass 6a W3.
+  private isAuthenticated = false;
+  private authenticationFailed = false;
 
   constructor() {
     try {
@@ -117,13 +118,13 @@ export class ClioApiClient {
   async initialize(): Promise<boolean> {
     try {
       // If we already know authentication failed, don't try again
-      if (authenticationFailed) {
+      if (this.authenticationFailed) {
         logger.warn('Authentication previously failed. Re-authentication required.');
         return false;
       }
 
       // If already authenticated, return success
-      if (isAuthenticated && this.tokens) {
+      if (this.isAuthenticated && this.tokens) {
         logger.debug('Client already initialized and authenticated');
         return true;
       }
@@ -150,7 +151,7 @@ export class ClioApiClient {
           if (!this.tokens.refresh_token || this.tokens.refresh_token.trim() === '') {
             logger.warn('No refresh token available. Re-authentication required.');
             await forceReauthentication();
-            authenticationFailed = true;
+            this.authenticationFailed = true;
             return false;
           }
 
@@ -160,7 +161,7 @@ export class ClioApiClient {
         } catch (refreshError) {
           logger.error('Failed to refresh token. Re-authentication required.', refreshError);
           await forceReauthentication();
-          authenticationFailed = true;
+          this.authenticationFailed = true;
           return false;
         }
       }
@@ -170,14 +171,14 @@ export class ClioApiClient {
         // Make a simple API call to verify the token works
         await this.listDocuments(1, 1);
         logger.info('Clio API token validated successfully');
-        isAuthenticated = true;
-        authenticationFailed = false;
+        this.isAuthenticated = true;
+        this.authenticationFailed = false;
         return true;
       } catch (validationError) {
         if (validationError instanceof Error && validationError.message === 'Authentication failed') {
           logger.error('Token validation failed. Re-authentication required.', validationError);
           await forceReauthentication();
-          authenticationFailed = true;
+          this.authenticationFailed = true;
           return false;
         } else {
           // If it's not an authentication error, might be something else
@@ -196,8 +197,8 @@ export class ClioApiClient {
    * Reset authentication status to force re-initialization
    */
   resetAuthenticationStatus() {
-    isAuthenticated = false;
-    authenticationFailed = false;
+    this.isAuthenticated = false;
+    this.authenticationFailed = false;
     this.tokens = null;
     logger.info('Clio API client authentication status reset');
   }
@@ -375,8 +376,8 @@ export class ClioApiClient {
 
             // If we couldn't refresh, or don't have a refresh token
             await forceReauthentication();
-            isAuthenticated = false;
-            authenticationFailed = true;
+            this.isAuthenticated = false;
+            this.authenticationFailed = true;
           }
 
           throw new Error('Authentication failed');
@@ -393,8 +394,8 @@ export class ClioApiClient {
         try {
           const responseData = await response.json();
           // Authentication succeeded, update status
-          isAuthenticated = true;
-          authenticationFailed = false;
+          this.isAuthenticated = true;
+          this.authenticationFailed = false;
           return responseData as T;
         } catch (jsonError) {
           // Check content type to provide better error message
@@ -421,8 +422,8 @@ export class ClioApiClient {
       } catch (error) {
         // If it's an authentication error, mark status
         if (error instanceof Error && error.message === 'Authentication failed') {
-          isAuthenticated = false;
-          authenticationFailed = true;
+          this.isAuthenticated = false;
+          this.authenticationFailed = true;
         }
 
         logger.error(`Error making request to ${endpoint}:`, error);
