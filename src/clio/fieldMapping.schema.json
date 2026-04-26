@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/PESystems/pjhb-legalcontext-ce/src/clio/fieldMapping.schema.json",
+  "title": "PJHB fieldMapping table — Grow ↔ Manage cross-system field reconciliation",
+  "description": "PJHB Pass 6b W2 schema. Each entry maps a Grow lex_custom row to its Clio Manage equivalent (or flags it as Grow-only conversion-time data loss). Auto-populated by src/clio/scripts/bootstrap-field-mapping.ts from the operator-supplied schema snapshot.",
+  "type": "object",
+  "required": ["version", "generated", "source_snapshot_sha256", "entries"],
+  "properties": {
+    "version": { "type": "integer", "const": 1 },
+    "generated": { "type": "string", "format": "date-time" },
+    "source_snapshot_sha256": {
+      "type": "object",
+      "description": "SHA256 of each snapshot JSON consumed at bootstrap time. Pass 7 compares against re-pull.",
+      "additionalProperties": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+    },
+    "entries": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/entry" }
+    }
+  },
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "required": ["grow_field_name", "canonical_name", "type", "transformer", "validation_rules", "drift_severity", "side"],
+      "properties": {
+        "grow_field_name": { "type": "string", "minLength": 1 },
+        "grow_field_id": { "type": "integer" },
+        "manage_field_id": { "type": ["integer", "null"] },
+        "manage_field_name": { "type": ["string", "null"] },
+        "canonical_name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "description": "Slug derived from the Grow name. Use this in PJHB-side code; never the raw Grow/Manage names."
+        },
+        "type": {
+          "type": "string",
+          "enum": ["text", "number", "date", "single_select", "multi_select", "free_text", "boolean", "money", "paragraph_text", "integer", "email"]
+        },
+        "transformer": {
+          "type": "string",
+          "description": "Named function reference. 'identity' means no transformation. Real transformers (e.g., word-form-to-decimal for 'two years') are added by Pass 7+."
+        },
+        "validation_rules": {
+          "type": "object",
+          "description": "Type-dependent validation. Empty object {} means no per-field rules beyond the type constraint."
+        },
+        "drift_severity": {
+          "type": "string",
+          "enum": ["low", "medium", "high"],
+          "description": "low: drift is annotation-only. medium: PJHB-side reconciliation logged; paralegal review at extraction time. high: blocks file workflow until reconciled, OR Grow-only field with no Manage equivalent (conversion-time data loss)."
+        },
+        "side": {
+          "type": "string",
+          "enum": ["matter", "contact"],
+          "description": "Whether this field belongs to a matter (case file) or contact (person/company) record."
+        },
+        "grow_only": { "type": "boolean", "description": "True when manage_field_id is null. Conversion-time data loss." },
+        "notes": { "type": "string" }
+      }
+    }
+  }
+}
