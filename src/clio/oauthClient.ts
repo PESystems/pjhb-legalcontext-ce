@@ -277,9 +277,16 @@ export async function refreshAccessToken(refreshToken: string): Promise<ClioToke
 }
 
 /**
- * Check if an access token is expired
- * Considers a token expired if it's within 60 seconds of actual expiration
+ * Check if an access token is expired.
+ *
+ * PJHB Pass 6a W5 / F10: safety margin bumped from 60s to 300s. The 60s
+ * margin assumed near-perfect client clock; in practice, virtualized hosts,
+ * NTP-less devices, and containers without clock sync can drift by minutes.
+ * 300s (5 minutes) absorbs realistic clock skew while still refreshing well
+ * before Clio's expiry would actually fire.
  */
+const TOKEN_EXPIRATION_SAFETY_MARGIN_SECONDS = 300;
+
 export function isTokenExpired(tokens: ClioTokens): boolean {
   if (!tokens.created_at || !tokens.expires_in) {
     // If we don't have created_at or expires_in, assume expired to be safe
@@ -289,6 +296,5 @@ export function isTokenExpired(tokens: ClioTokens): boolean {
   const expirationTime = tokens.created_at + tokens.expires_in;
   const currentTime = Math.floor(Date.now() / 1000);
 
-  // Consider the token expired if it's within 60 seconds of expiration
-  return currentTime >= (expirationTime - 60);
+  return currentTime >= (expirationTime - TOKEN_EXPIRATION_SAFETY_MARGIN_SECONDS);
 }
