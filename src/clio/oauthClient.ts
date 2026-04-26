@@ -1,5 +1,3 @@
-// Path: /Users/deletosh/projects/legal-context/src/clio/oauthClient.ts
-
 /**
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -15,11 +13,17 @@
  * This module implements the OAuth 2.0 client for authenticating with the Clio API.
  * It handles generating authorization URLs, exchanging authorization codes for tokens,
  * and refreshing expired tokens.
+ *
+ * PJHB fork modification — F3 (Pass 6a W4): PKCE per RFC 7636 added to the
+ * authorization-code grant flow. RFC 8252 says PKCE is REQUIRED for native
+ * apps using loopback redirect (which this client is). Closes the gap between
+ * upstream's plain authorization-code grant and current OAuth security
+ * baseline.
  */
 
 import { config, validateClioConfig } from "../config";
 import { logger } from "../logger";
-import { randomBytes } from "crypto";
+import { createHash, randomBytes } from "crypto";
 
 // Define token response interface
 export interface ClioTokens {
@@ -28,6 +32,32 @@ export interface ClioTokens {
   token_type: string;
   expires_in: number;
   created_at?: number; // We add this for tracking expiration
+}
+
+// PKCE constants per RFC 7636
+const PKCE_VERIFIER_BYTES = 32; // 32 random bytes → base64url ~43 chars (RFC range: 43–128)
+
+/**
+ * Encode a Buffer as base64url (RFC 4648 §5: base64 with -_ alphabet, no padding).
+ */
+function base64url(buf: Buffer): string {
+  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/**
+ * Generate a cryptographically secure PKCE code_verifier (RFC 7636 §4.1).
+ * Returns a base64url-encoded random string in the 43–128 character range.
+ */
+export function generateCodeVerifier(): string {
+  return base64url(randomBytes(PKCE_VERIFIER_BYTES));
+}
+
+/**
+ * Compute PKCE code_challenge = base64url(SHA256(code_verifier)) per RFC 7636 §4.2,
+ * using the S256 method. Plain code_challenge_method is intentionally NOT supported.
+ */
+export function computeCodeChallenge(codeVerifier: string): string {
+  return base64url(createHash('sha256').update(codeVerifier, 'ascii').digest());
 }
 
 /**
@@ -68,9 +98,14 @@ export function generateSecureState(): string {
 }
 
 /**
- * Generate the authorization URL for redirecting users to Clio's OAuth page
+ * Generate the authorization URL for redirecting users to Clio's OAuth page.
+ *
+ * @param state CSRF state token (typically from generateSecureState()).
+ * @param codeChallenge PKCE code_challenge (typically computeCodeChallenge(verifier)).
+ *   Required per Pass 6a W4 / RFC 8252; plain authorization-code grant is no
+ *   longer supported by this client.
  */
-export function generateAuthorizationUrl(state: string): string {
+export function generateAuthorizationUrl(state: string, codeChallenge: string): string {
   validateClioConfig(); // Ensure Clio config is valid
 
   const baseUrl = getClioBaseUrl();
@@ -87,19 +122,30 @@ export function generateAuthorizationUrl(state: string): string {
     throw new Error('CLIO_REDIRECT_URI is not configured in environment variables');
   }
 
+  if (!codeChallenge) {
+    throw new Error('PKCE code_challenge is required (Pass 6a W4 / RFC 8252)');
+  }
+
   // Add required query parameters
   url.searchParams.append('response_type', 'code');
   url.searchParams.append('client_id', clientId);
   url.searchParams.append('redirect_uri', redirectUri);
   url.searchParams.append('state', state);
+  // PKCE parameters per RFC 7636
+  url.searchParams.append('code_challenge', codeChallenge);
+  url.searchParams.append('code_challenge_method', 'S256');
 
   return url.toString();
 }
 
 /**
- * Exchange an authorization code for access and refresh tokens
+ * Exchange an authorization code for access and refresh tokens.
+ *
+ * @param code Authorization code returned to the redirect URI.
+ * @param codeVerifier PKCE code_verifier matching the code_challenge sent at
+ *   authorization time. Required per Pass 6a W4 / RFC 8252.
  */
-export async function exchangeCodeForTokens(code: string): Promise<ClioTokens> {
+export async function exchangeCodeForTokens(code: string, codeVerifier: string): Promise<ClioTokens> {
   validateClioConfig(); // Ensure Clio config is valid
 
   const baseUrl = getClioBaseUrl();
@@ -121,6 +167,10 @@ export async function exchangeCodeForTokens(code: string): Promise<ClioTokens> {
     throw new Error('CLIO_REDIRECT_URI is not configured in environment variables');
   }
 
+  if (!codeVerifier) {
+    throw new Error('PKCE code_verifier is required (Pass 6a W4 / RFC 8252)');
+  }
+
   // Create request body with all parameters
   const body = new URLSearchParams();
   body.append('grant_type', 'authorization_code');
@@ -128,10 +178,12 @@ export async function exchangeCodeForTokens(code: string): Promise<ClioTokens> {
   body.append('redirect_uri', redirectUri);
   body.append('client_id', clientId);
   body.append('client_secret', clientSecret);
+  // PKCE parameter per RFC 7636
+  body.append('code_verifier', codeVerifier);
 
   // Log request details for debugging (redact sensitive info)
   logger.debug(`Token exchange URL: ${url.toString()}`);
-  logger.debug(`Request body: grant_type=authorization_code, code=REDACTED, redirect_uri=${redirectUri}, client_id=${clientId}, client_secret=REDACTED`);
+  logger.debug(`Request body: grant_type=authorization_code, code=REDACTED, redirect_uri=${redirectUri}, client_id=${clientId}, client_secret=REDACTED, code_verifier=REDACTED`);
 
   try {
     const response = await fetch(url.toString(), {

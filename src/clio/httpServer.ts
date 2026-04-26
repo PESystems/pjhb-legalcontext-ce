@@ -17,11 +17,14 @@
 import { Server } from "bun";
 import { config } from "../config";
 import { logger } from "../logger";
-import { exchangeCodeForTokens, generateAuthorizationUrl } from "./oauthClient";
+import { computeCodeChallenge, exchangeCodeForTokens, generateAuthorizationUrl, generateCodeVerifier } from "./oauthClient";
 import { secureTokenStorage } from "./tokenStorage";
 
-// Simple in-memory state store for CSRF protection
-const stateStore: Map<string, { createdAt: number }> = new Map();
+// Simple in-memory state store for CSRF protection.
+// PJHB Pass 6a W4: extended to also hold the PKCE code_verifier per RFC 7636.
+// The verifier is generated at /clio/auth time, stored keyed by state, and
+// retrieved at callback time to send to the token-exchange endpoint.
+const stateStore: Map<string, { createdAt: number; codeVerifier: string }> = new Map();
 
 // Define helper functions to get paths
 function getClioRedirectUri(): string {
@@ -52,19 +55,23 @@ function cleanupExpiredStates() {
   }
 }
 
-// Create state and store it
-function createAndStoreState(): string {
+// Create state + PKCE verifier, store both, return both for use in the
+// authorization URL. PJHB Pass 6a W4 / RFC 7636.
+function createAndStoreState(): { state: string; codeVerifier: string } {
   // Generate a random state value for CSRF protection
-  const state = Math.random().toString(36).substring(2, 15) + 
+  const state = Math.random().toString(36).substring(2, 15) +
                Math.random().toString(36).substring(2, 15);
-  
-  // Store state with timestamp
-  stateStore.set(state, { createdAt: Date.now() });
-  
+
+  // Generate PKCE code_verifier (cryptographically secure, RFC 7636 compliant)
+  const codeVerifier = generateCodeVerifier();
+
+  // Store state + verifier with timestamp
+  stateStore.set(state, { createdAt: Date.now(), codeVerifier });
+
   // Schedule cleanup
   setTimeout(cleanupExpiredStates, 10 * 60 * 1000);
-  
-  return state;
+
+  return { state, codeVerifier };
 }
 
 /**
@@ -87,12 +94,13 @@ export function startOAuthServer(): Server {
       // Handle the OAuth initiation endpoint
       if (url.pathname === authPath) {
         try {
-          // Create and store state
-          const state = createAndStoreState();
-          
-          // Generate authorization URL
-          const authUrl = generateAuthorizationUrl(state);
-          
+          // Create state + PKCE code_verifier; compute code_challenge (S256)
+          const { state, codeVerifier } = createAndStoreState();
+          const codeChallenge = computeCodeChallenge(codeVerifier);
+
+          // Generate authorization URL with PKCE parameters
+          const authUrl = generateAuthorizationUrl(state, codeChallenge);
+
           // Redirect to Clio's authorization page
           return new Response(null, {
             status: 302,
@@ -116,18 +124,20 @@ export function startOAuthServer(): Server {
           return new Response("Missing required parameters", { status: 400 });
         }
         
-        // Validate state to prevent CSRF attacks
-        if (!stateStore.has(state)) {
+        // Validate state to prevent CSRF attacks; retrieve the PKCE verifier
+        const stored = stateStore.get(state);
+        if (!stored) {
           logger.error("Invalid OAuth state parameter");
           return new Response("Invalid state parameter", { status: 403 });
         }
-        
+        const { codeVerifier } = stored;
+
         // Remove used state
         stateStore.delete(state);
-        
+
         try {
-          // Exchange authorization code for tokens
-          const tokens = await exchangeCodeForTokens(code);
+          // Exchange authorization code for tokens (with PKCE verifier)
+          const tokens = await exchangeCodeForTokens(code, codeVerifier);
           
           // Store tokens securely
           await secureTokenStorage.saveTokens(tokens);
