@@ -19,6 +19,34 @@ const RATE_LIMIT_RETRY_DELAY = 2000; // 2 seconds
 const MAX_REQUESTS_PER_MINUTE = 48; // Clio's limit is 50, we use 48 to be safe
 const MINUTE_IN_MS = 60 * 1000;
 
+// PJHB Pass 6a W5 / F6: allowed Clio API hosts. fetch() uses redirect:'manual'
+// in this client; if Clio responds with 3xx, we validate Location stays within
+// these hosts before following. Prevents bearer-token forwarding to attacker
+// hosts in the unlikely event of a compromised intermediate.
+const ALLOWED_CLIO_HOSTS = new Set([
+  'app.clio.com',
+  'ca.app.clio.com',
+  'eu.app.clio.com',
+  'au.app.clio.com',
+]);
+
+// PJHB Pass 6a W5 / F7: redact Bearer tokens (and similar Authorization-style
+// fragments) from any text before logging. Defense-in-depth: error responses
+// from Clio normally don't echo headers, but defensive logging shouldn't depend
+// on that contract. Output is also length-capped to keep logs manageable.
+const ERROR_LOG_MAX_LENGTH = 2048;
+function redactSensitive(text: string): string {
+  if (typeof text !== 'string') return String(text);
+  let cleaned = text.replace(/Bearer\s+[A-Za-z0-9._\-+/=]+/g, 'Bearer [REDACTED]');
+  // Catch-all: any "access_token":"..." or "refresh_token":"..." in JSON payloads.
+  cleaned = cleaned.replace(/("access_token"\s*:\s*")[^"]+(")/g, '$1[REDACTED]$2');
+  cleaned = cleaned.replace(/("refresh_token"\s*:\s*")[^"]+(")/g, '$1[REDACTED]$2');
+  if (cleaned.length > ERROR_LOG_MAX_LENGTH) {
+    cleaned = cleaned.slice(0, ERROR_LOG_MAX_LENGTH) + ` [truncated; original ${cleaned.length} bytes]`;
+  }
+  return cleaned;
+}
+
 // Clio API response interfaces
 export interface ClioDocument {
   id: string;
@@ -296,7 +324,8 @@ export class ClioApiClient {
     const options: RequestInit = {
       method,
       headers,
-      redirect: 'follow',
+      // PJHB Pass 6a W5 / F6: 'manual' + Location-host validation below.
+      redirect: 'manual',
     };
 
     // Add body for non-GET requests with data
@@ -334,6 +363,30 @@ export class ClioApiClient {
         this.recordRequest();
 
         const response = await fetch(url.toString(), options);
+
+        // PJHB Pass 6a W5 / F6: Clio API isn't expected to redirect, but if
+        // a 3xx surfaces, validate Location stays within Clio hosts before
+        // following. Otherwise we'd forward the bearer token to whatever
+        // host Location names.
+        if (response.status >= 300 && response.status < 400) {
+          const location = response.headers.get('location');
+          if (location) {
+            try {
+              const target = new URL(location, this.baseUrl);
+              if (!ALLOWED_CLIO_HOSTS.has(target.hostname)) {
+                logger.error(
+                  `Refusing to follow redirect to non-Clio host: ${target.hostname}. ` +
+                  `Original: ${url.host}.`,
+                );
+                throw new Error(`Refused redirect to non-Clio host: ${target.hostname}`);
+              }
+            } catch (urlErr) {
+              logger.error(`Malformed redirect Location header: ${urlErr}`);
+              throw new Error('Malformed redirect from Clio API');
+            }
+          }
+          throw new Error(`Unexpected redirect from Clio API: ${response.status}`);
+        }
 
         // Handle rate limiting
         if (response.status === 429) {
@@ -385,7 +438,8 @@ export class ClioApiClient {
 
         // Handle other errors
         if (!response.ok) {
-          const errorText = await response.text();
+          // F7: scrub Bearer tokens + cap length before logging.
+          const errorText = redactSensitive(await response.text());
           logger.error(`API request failed: ${response.status} ${response.statusText}`, errorText);
           throw new Error(`API request failed: ${response.status} ${response.statusText}`);
         }
@@ -401,10 +455,10 @@ export class ClioApiClient {
           // Check content type to provide better error message
           const contentType = response.headers.get('Content-Type');
 
-          // Get response text for logging
+          // Get response text for logging (F7: scrub + cap)
           let responseText;
           try {
-            responseText = await response.text();
+            responseText = redactSensitive(await response.text());
           } catch (textError) {
             responseText = `[Could not get response text: ${textError}]`;
           }
@@ -481,8 +535,38 @@ export class ClioApiClient {
         headers: {
           'Authorization': `Bearer ${this.tokens.access_token}`,
         },
-        redirect: 'follow',
+        // PJHB Pass 6a W5 / F6: 'manual' + Location-host validation below.
+        redirect: 'manual',
       });
+
+      // F6: validate any Clio-issued redirect target before following. Clio
+      // CAN issue 3xx for document downloads (e.g., a presigned URL on S3).
+      // For downloads we may need to follow to a non-Clio host (S3); allow
+      // that explicitly only after host-allowlist check passes.
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.get('location');
+        if (!location) {
+          throw new Error(`Redirect from Clio download with no Location header (${response.status})`);
+        }
+        // For document downloads, Clio commonly redirects to its presigned-
+        // URL CDN (clio-cdn / clio-app-fileservice domains). Allow these
+        // explicitly; reject anything else.
+        const target = new URL(location, this.baseUrl);
+        const isClioHost = ALLOWED_CLIO_HOSTS.has(target.hostname);
+        const isClioCdn = /\.clio\.com$|\.clio-cdn\.com$|\.cloudfront\.net$|\.amazonaws\.com$/.test(target.hostname);
+        if (!isClioHost && !isClioCdn) {
+          logger.error(`Refusing to follow document-download redirect to: ${target.hostname}`);
+          throw new Error(`Refused redirect to non-Clio CDN host: ${target.hostname}`);
+        }
+        // For the redirect-to-CDN path we need to re-issue without the
+        // Authorization header (presigned URLs carry their own credentials).
+        const downloadResp = await fetch(target.toString(), { method: 'GET' });
+        if (!downloadResp.ok) {
+          throw new Error(`Failed to download from CDN: ${downloadResp.status} ${downloadResp.statusText}`);
+        }
+        const buf = await downloadResp.arrayBuffer();
+        return Buffer.from(buf);
+      }
 
       if (!response.ok) {
         throw new Error(`Failed to download document: ${response.status} ${response.statusText}`);

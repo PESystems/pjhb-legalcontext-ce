@@ -1,4 +1,3 @@
-// Path: /Users/deletosh/projects/legal-context/src/documents/documentProcessor.ts
 
 /**
  * This Source Code Form is subject to the terms of the Mozilla Public
