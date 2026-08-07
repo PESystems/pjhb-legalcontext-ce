@@ -27,7 +27,7 @@ import { createHash } from 'crypto';
 import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import type { FieldMappingTable, FieldMappingEntry, FieldType, DriftSeverity, FieldSide } from '../fieldMapping';
-import { validateFieldMapping } from '../fieldMapping';
+import { validateFieldMapping, DEFAULT_TRANSFORMER_BY_TYPE } from '../fieldMapping';
 
 interface GrowLexCustom {
   id: number;
@@ -55,18 +55,25 @@ interface ManageCustomField {
  * We canonicalize on a single vocabulary.
  */
 function mapGrowType(growType: string): FieldType {
-  const lc = (growType || '').toLowerCase();
+  const lc = (growType || '').toLowerCase().trim();
   switch (lc) {
     case 'single_line_text':
     case 'singleline':
+    case 'text (one-line)':   // Manage settings-UI label (Pass 6b snapshot)
+    case 'text_line':         // Manage API enum (Pass 7 raw snapshot)
+    case 'text field':
     case 'text':           return 'text';
     case 'paragraph':
     case 'paragraph_text':
+    case 'text (multi-line)': // Manage settings-UI label
+    case 'text_area':         // Manage API enum
+    case 'text area':
     case 'multiline_text': return 'paragraph_text';
     case 'date':           return 'date';
     case 'integer':
     case 'int':            return 'integer';
     case 'number':
+    case 'numeric':           // Manage API enum
     case 'decimal':
     case 'float':          return 'number';
     case 'money':
@@ -82,7 +89,9 @@ function mapGrowType(growType: string): FieldType {
     case 'email':          return 'email';
     case 'free_text':      return 'free_text';
     default:
-      // Conservative fallback — text covers most unknowns
+      // Conservative fallback — text covers most unknowns (incl. Manage's
+      // reference types `contact` / `matter` / `url` / `time`, which carry
+      // string payloads through the mapping layer).
       return 'text';
   }
 }
@@ -105,11 +114,40 @@ function slugify(name: string): string {
   return s;
 }
 
+/**
+ * Coarse type family for mismatch detection. Within-family differences
+ * (text vs paragraph_text, integer vs number) are presentation-level;
+ * cross-family differences change storage semantics.
+ */
+function typeFamily(t: FieldType): 'textual' | 'numeric' | 'date' | 'boolean' | 'select' {
+  switch (t) {
+    case 'integer': case 'number': case 'money': return 'numeric';
+    case 'date': return 'date';
+    case 'boolean': return 'boolean';
+    case 'single_select': case 'multi_select': return 'select';
+    default: return 'textual';
+  }
+}
+
 interface GrowLexCustomFile {
   lex_customs?: GrowLexCustom[];
 }
 interface ManageCustomFieldsFile {
+  /** Pass 6b snapshot shape (settings-UI capture / reconstruction). */
   rows?: ManageCustomField[];
+  /** Pass 7+ snapshot shape (raw /api/v4/custom_fields response). */
+  data?: Array<ManageCustomField & { deleted?: boolean }>;
+}
+
+/**
+ * Normalize either Manage snapshot shape to a row list. Raw API responses
+ * include soft-deleted fields; those are excluded (a deleted Manage field is
+ * not a valid mapping target).
+ */
+function manageRows(file: ManageCustomFieldsFile): ManageCustomField[] {
+  if (Array.isArray(file.rows)) return file.rows;
+  if (Array.isArray(file.data)) return file.data.filter((r) => !r.deleted);
+  return [];
 }
 
 function loadJson<T>(path: string): T {
@@ -125,6 +163,14 @@ function sha256OfFile(path: string): string {
 
 export interface BootstrapInputs {
   snapshotDir: string;
+  /**
+   * Optional fallback snapshot directory consulted for files absent from
+   * snapshotDir. Pass 7 usage: snapshotDir = the fresh Manage-side API
+   * re-pull, fallbackDir = the Pass 6b snapshot whose Grow-side files
+   * (operator-browser captures, not reachable via the Manage OAuth token)
+   * remain the authoritative baseline.
+   */
+  fallbackDir?: string;
   /** When true, return the table without writing to disk. Used by tests. */
   dryRun?: boolean;
   /** When set, write to this path instead of src/clio/fieldMapping.json. */
@@ -143,20 +189,29 @@ export interface BootstrapResult {
  */
 export function bootstrap(inputs: BootstrapInputs): BootstrapResult {
   const dir = inputs.snapshotDir;
-  const growMatterPath  = join(dir, 'grow_matter_lex_customs.json');
-  const growContactPath = join(dir, 'grow_contact_lex_customs.json');
-  const manageMatterPath  = join(dir, 'manage_matter_custom_fields.json');
-  const manageContactPath = join(dir, 'manage_contact_custom_fields.json');
+  const resolveSnapshotFile = (name: string): string => {
+    const primary = join(dir, name);
+    if (existsSync(primary)) return primary;
+    if (inputs.fallbackDir) {
+      const fallback = join(inputs.fallbackDir, name);
+      if (existsSync(fallback)) return fallback;
+    }
+    return primary; // let loadJson raise the missing-file error on the primary path
+  };
+  const growMatterPath  = resolveSnapshotFile('grow_matter_lex_customs.json');
+  const growContactPath = resolveSnapshotFile('grow_contact_lex_customs.json');
+  const manageMatterPath  = resolveSnapshotFile('manage_matter_custom_fields.json');
+  const manageContactPath = resolveSnapshotFile('manage_contact_custom_fields.json');
 
   const growMatter   = loadJson<GrowLexCustomFile>(growMatterPath);
   const growContact  = loadJson<GrowLexCustomFile>(growContactPath);
   const manageMatter = loadJson<ManageCustomFieldsFile>(manageMatterPath);
   const manageContact = loadJson<ManageCustomFieldsFile>(manageContactPath);
 
-  // Build Manage id → row index for fast lookup
+  // Build Manage id → row index for fast lookup (accepts both snapshot shapes)
   const manageById = new Map<number, ManageCustomField>();
-  for (const row of (manageMatter.rows  ?? [])) manageById.set(row.id, row);
-  for (const row of (manageContact.rows ?? [])) manageById.set(row.id, row);
+  for (const row of manageRows(manageMatter))  manageById.set(row.id, row);
+  for (const row of manageRows(manageContact)) manageById.set(row.id, row);
 
   function buildEntries(rows: GrowLexCustom[], side: FieldSide): FieldMappingEntry[] {
     const out: FieldMappingEntry[] = [];
@@ -164,14 +219,17 @@ export function bootstrap(inputs: BootstrapInputs): BootstrapResult {
       const linked = row.clio_field === true && typeof row.clio_field_id === 'number';
       const manageRow = linked ? manageById.get(row.clio_field_id as number) : undefined;
       const canonical = slugify(row.name);
+      const type = mapGrowType(row.field_type);
       const entry: FieldMappingEntry = {
         grow_field_name: row.name,
         grow_field_id: row.id,
         manage_field_id: linked ? (row.clio_field_id as number) : null,
         manage_field_name: manageRow ? manageRow.name : null,
         canonical_name: canonical,
-        type: mapGrowType(row.field_type),
-        transformer: 'identity', // placeholder; Pass 7+ adds real transformers
+        type,
+        // Pass 7: type-appropriate normalizing transformer (identity retained
+        // in the registry but no longer the default).
+        transformer: DEFAULT_TRANSFORMER_BY_TYPE[type] ?? 'identity',
         validation_rules: {},
         drift_severity: linked ? 'low' : 'high',
         side,
@@ -179,6 +237,18 @@ export function bootstrap(inputs: BootstrapInputs): BootstrapResult {
       };
       if (!linked) {
         entry.notes = 'Grow-only field; no Manage equivalent. Conversion-time data loss flagged for Pass 7 auto-population design.';
+      } else if (manageRow) {
+        // Pass 7: surface Grow-vs-Manage declared-type mismatches (e.g. the
+        // firm retyped ESA Entitlements from text to numeric on the Manage
+        // side). Only cross-FAMILY mismatches are flagged — text_line vs
+        // text_area is presentation, text vs numeric is a storage-semantics
+        // change. Flagged entries floor at medium severity for paralegal
+        // review at extraction.
+        const manageType = mapGrowType(manageRow.field_type);
+        if (typeFamily(manageType) !== typeFamily(type)) {
+          entry.notes = `Type mismatch: Grow declares ${type} (${row.field_type}), Manage declares ${manageType} (${manageRow.field_type}). Values normalized via ${entry.transformer}; review at extraction.`;
+          if (entry.drift_severity === 'low') entry.drift_severity = 'medium';
+        }
       }
       out.push(entry);
     }
@@ -256,7 +326,7 @@ export function bootstrap(inputs: BootstrapInputs): BootstrapResult {
     'manage_practice_areas.json',
   ];
   for (const f of trackedFiles) {
-    const p = join(dir, f);
+    const p = resolveSnapshotFile(f);
     if (existsSync(p)) snapshotSha[f] = sha256OfFile(p);
   }
 
@@ -327,11 +397,12 @@ if (isMain()) {
     console.error(
       'PJHB_SCHEMA_SNAPSHOT_DIR env var is required.\n' +
       'Set it to the absolute path of the workspace\'s ' +
-      '07_research/clio_schema_snapshot/files/ directory.',
+      '07_research/clio_schema_snapshot/files/ directory.\n' +
+      'Optional: PJHB_SCHEMA_SNAPSHOT_FALLBACK_DIR for files absent from the primary dir.',
     );
     process.exit(1);
   }
-  const result = bootstrap({ snapshotDir: dir });
+  const result = bootstrap({ snapshotDir: dir, fallbackDir: process.env.PJHB_SCHEMA_SNAPSHOT_FALLBACK_DIR });
   console.log(`fieldMapping.json written to: ${result.writtenTo}`);
   console.log(`Rows: matter=${result.rowCounts.matter}  contact=${result.rowCounts.contact}  total=${result.rowCounts.total}  grow-only=${result.rowCounts.growOnly}`);
 }

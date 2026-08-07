@@ -214,6 +214,81 @@ async function main() {
     }
   }
 
+  // ---- Test 10 (Pass 7): typed transformers ----
+  console.log('\nTest 10 — Pass 7 typed transformers');
+  check('trim_text collapses whitespace', applyTransformer('trim_text', '  five   years  ') === 'five years');
+  check('trim_text empty -> null', applyTransformer('trim_text', '   ') === null);
+  check('date_iso ISO passthrough', applyTransformer('date_iso', '2020-01-05') === '2020-01-05');
+  check('date_iso long form', applyTransformer('date_iso', 'January 5, 2020') === '2020-01-05');
+  check('date_iso day-first long form', applyTransformer('date_iso', '5 January 2020') === '2020-01-05');
+  check('date_iso self-disambiguating numeric', applyTransformer('date_iso', '25/06/2019') === '2019-06-25');
+  check('date_iso ambiguous numeric passes through', applyTransformer('date_iso', '04/05/2020') === '04/05/2020');
+  check('number_parse plain', applyTransformer('number_parse', '65000') === 65000);
+  check('number_parse comma+decimal', applyTransformer('number_parse', '65,000.50') === 65000.5);
+  check('number_parse word form', applyTransformer('number_parse', 'two') === 2);
+  check('number_parse unparseable passes through', applyTransformer('number_parse', '5 years approx') === '5 years approx');
+  check('money_parse dollar sign', applyTransformer('money_parse', '$32,000') === 32000);
+  check('money_parse CAD suffix', applyTransformer('money_parse', '13000 CAD') === 13000);
+  check('money_parse rounds to cents', applyTransformer('money_parse', 12.345) === 12.35 || applyTransformer('money_parse', 12.345) === 12.34);
+  check('boolean_parse yes -> true', applyTransformer('boolean_parse', 'Yes') === true);
+  check('boolean_parse N -> false', applyTransformer('boolean_parse', 'N') === false);
+  check('boolean_parse boolean passthrough', applyTransformer('boolean_parse', true) === true);
+  check('boolean_parse unparseable passes through', applyTransformer('boolean_parse', 'maybe') === 'maybe');
+  check('select_trim normalizes', applyTransformer('select_trim', ' Toronto  East ') === 'Toronto East');
+  {
+    const ms = applyTransformer('multi_select_split', 'A; B, C') as string[];
+    check('multi_select_split splits to 3', Array.isArray(ms) && ms.length === 3 && ms[2] === 'C');
+  }
+  check('email_normalize lowercases', applyTransformer('email_normalize', ' Foo@Bar.COM ') === 'foo@bar.com');
+  check('identity still registered', applyTransformer('identity', ' x ') === ' x ');
+
+  // ---- Test 11 (Pass 7): type-aware drift comparison ----
+  console.log('\nTest 11 — Pass 7 type-aware drift comparison');
+  {
+    const moneyEntry = makeEntry({ canonical_name: 'settled_amount', type: 'money', transformer: 'money_parse' });
+    const d1 = detectDrift(moneyEntry, '$13,000', 13000);
+    check('money representation difference is NOT drift', d1.match === true);
+    check('equivalence reason recorded', d1.reason === 'values equivalent after normalization');
+    const d2 = detectDrift(moneyEntry, '$13,000', 15000);
+    check('true money difference IS drift', d2.match === false);
+    const dateEntry = makeEntry({ canonical_name: 'start_date', type: 'date', transformer: 'date_iso' });
+    const d3 = detectDrift(dateEntry, 'January 5, 2020', '2020-01-05');
+    check('date representation difference is NOT drift', d3.match === true);
+    const boolEntry = makeEntry({ canonical_name: 'sign_on_termination', type: 'boolean', transformer: 'boolean_parse' });
+    const d4 = detectDrift(boolEntry, 'Yes', true);
+    check('boolean representation difference is NOT drift', d4.match === true);
+  }
+
+  // ---- Test 12 (Pass 7): bootstrap against Pass 7 raw-API snapshot with fallback ----
+  console.log('\nTest 12 — bootstrap against Pass 7 snapshot (raw API shape + Grow fallback)');
+  const pass7Dir = process.env.PJHB_SCHEMA_SNAPSHOT_DIR_PASS7;
+  const fallback = process.env.PJHB_SCHEMA_SNAPSHOT_DIR;
+  if (!pass7Dir || !fallback) {
+    console.warn('  [SKIP] Test 12 — set PJHB_SCHEMA_SNAPSHOT_DIR_PASS7 (+ PJHB_SCHEMA_SNAPSHOT_DIR as fallback) to run');
+  } else {
+    const r = bootstrap({ snapshotDir: pass7Dir, fallbackDir: fallback, dryRun: true });
+    check('pass7 bootstrap row count still 58', r.rowCounts.total === 58);
+    check('pass7 bootstrap still 5 grow-only', r.rowCounts.growOnly === 5);
+    const byCanonical = new Map(r.table.entries.map(e => [e.canonical_name, e]));
+    const notice = byCanonical.get('notice_offered');
+    check('notice_offered manage name carries the drifted exact form',
+      notice?.manage_field_name === 'Notice Offered ',
+      `got ${JSON.stringify(notice?.manage_field_name)}`);
+    // ESA Entitlements: April Manage snapshot said text (mismatch vs Grow's
+    // integer); the firm has since retyped Manage to numeric, ALIGNING the
+    // sides. With the Pass 7 snapshot there must be no mismatch note and the
+    // integer transformer must be assigned.
+    const esa = byCanonical.get('esa_entitlements');
+    check('esa_entitlements aligned after firm retype (no mismatch note)',
+      esa !== undefined && !(esa.notes ?? '').includes('Type mismatch'),
+      `severity=${esa?.drift_severity} notes=${esa?.notes}`);
+    check('esa_entitlements uses integer_parse', esa?.transformer === 'integer_parse');
+    const typed = r.table.entries.filter(e => e.transformer !== 'identity');
+    check('all entries carry typed transformers', typed.length === r.table.entries.length);
+    const r2 = bootstrap({ snapshotDir: pass7Dir, fallbackDir: fallback, dryRun: true });
+    check('pass7 bootstrap idempotent', JSON.stringify(r.table) === JSON.stringify(r2.table));
+  }
+
   // Cleanup
   rmSync(tmp, { recursive: true, force: true });
 
