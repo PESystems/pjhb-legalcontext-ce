@@ -264,6 +264,16 @@ export async function refreshAccessToken(refreshToken: string): Promise<ClioToke
 
     const tokens = await response.json() as ClioTokens;
 
+    // PJHB Pass 7: Clio does not reissue refresh_token on refresh (RFC 6749 §6
+    // permits this — "the client MUST keep using the previously-issued refresh
+    // token"). Merge the original refresh token here so every caller receives a
+    // complete ClioTokens and can persist it directly. Without this, a caller
+    // that saved the raw response would attempt the next refresh with
+    // refresh_token=undefined and break (latent bug found in Pass 6c W3).
+    if (!tokens.refresh_token) {
+      tokens.refresh_token = refreshToken;
+    }
+
     // Add created_at timestamp if not provided by the API
     if (!tokens.created_at) {
       tokens.created_at = Math.floor(Date.now() / 1000);
