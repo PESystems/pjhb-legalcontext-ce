@@ -274,7 +274,7 @@ export function bootstrap(inputs: BootstrapInputs): BootstrapResult {
     const out: FieldMappingEntry[] = [];
     for (const [base, group] of groups) {
       if (group.length === 1) {
-        out.push(group[0]);
+        out.push(group[0]!);
         continue;
       }
       const mapped = group.filter(g => g.manage_field_id !== null);
@@ -283,7 +283,7 @@ export function bootstrap(inputs: BootstrapInputs): BootstrapResult {
       let bareTaken = false;
       const ordered = [...mapped, ...growOnly];
       for (let i = 0; i < ordered.length; i++) {
-        const e = ordered[i];
+        const e = ordered[i]!;
         if (!bareTaken) {
           out.push({ ...e, canonical_name: base });
           bareTaken = true;
@@ -387,7 +387,7 @@ function deriveDeterministicTimestamp(snapshotSha: Record<string, string>): stri
 function isMain(): boolean {
   try {
     const here = fileURLToPath(import.meta.url);
-    return process.argv[1] === here || process.argv[1]?.endsWith('bootstrap-field-mapping.ts');
+    return process.argv[1] === here || Boolean(process.argv[1]?.endsWith('bootstrap-field-mapping.ts'));
   } catch { return false; }
 }
 

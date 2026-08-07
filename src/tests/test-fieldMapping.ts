@@ -176,8 +176,8 @@ async function main() {
   const growOnlyList = listGrowOnlyEntries(tableWithGrowOnly);
   check('listGrowOnlyEntries returns 2', growOnlyList.length === 2);
   const warnings = emitConversionWarnings(tableWithGrowOnly, { grow_a: 'val-a', mapped: 'safe' });
-  check('emits warning for present grow-only field', warnings.length === 1 && warnings[0].canonical_name === 'grow_a');
-  check('warning carries side info', warnings[0].side === 'matter');
+  check('emits warning for present grow-only field', warnings.length === 1 && warnings[0]?.canonical_name === 'grow_a');
+  check('warning carries side info', warnings[0]?.side === 'matter');
   check('does NOT warn on mapped fields', !warnings.some(w => w.canonical_name === 'mapped'));
   const noWarnings = emitConversionWarnings(tableWithGrowOnly, { mapped: 'only-mapped' });
   check('zero warnings when no grow-only data present', noWarnings.length === 0);

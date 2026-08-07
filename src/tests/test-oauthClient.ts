@@ -40,7 +40,7 @@ function mockTokenResponse(payload: Record<string, unknown>): void {
     new Response(JSON.stringify(payload), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
-    })) as typeof fetch;
+    })) as unknown as typeof fetch;
 }
 
 console.log('Test 1 — refresh response WITHOUT refresh_token (Clio production behavior)');
@@ -91,7 +91,7 @@ mockTokenResponse({
 
 console.log('Test 4 — HTTP error surfaces as thrown error (no partial token object)');
 globalThis.fetch = (async () =>
-  new Response('{"error":"invalid_grant"}', { status: 401, statusText: 'Unauthorized' })) as typeof fetch;
+  new Response('{"error":"invalid_grant"}', { status: 401, statusText: 'Unauthorized' })) as unknown as typeof fetch;
 {
   let threw = false;
   try {

@@ -246,17 +246,17 @@ export function dateIsoTransformer(value: unknown): unknown {
   const s = value.replace(/\s+/g, ' ').trim();
 
   let m = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
-  if (m) return isoDate(+m[1], +m[2], +m[3]) ?? s;
+  if (m) return isoDate(+m[1]!, +m[2]!, +m[3]!) ?? s;
 
   m = s.match(/^([A-Za-z]+)\.? (\d{1,2})(?:st|nd|rd|th)?,? (\d{4})$/);
-  if (m && MONTHS[m[1].toLowerCase()]) return isoDate(+m[3], MONTHS[m[1].toLowerCase()], +m[2]) ?? s;
+  if (m && MONTHS[m[1]!.toLowerCase()]) return isoDate(+m[3]!, MONTHS[m[1]!.toLowerCase()]!, +m[2]!) ?? s;
 
   m = s.match(/^(\d{1,2})(?:st|nd|rd|th)? ([A-Za-z]+)\.?,? (\d{4})$/);
-  if (m && MONTHS[m[2].toLowerCase()]) return isoDate(+m[3], MONTHS[m[2].toLowerCase()], +m[1]) ?? s;
+  if (m && MONTHS[m[2]!.toLowerCase()]) return isoDate(+m[3]!, MONTHS[m[2]!.toLowerCase()]!, +m[1]!) ?? s;
 
   m = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
   if (m) {
-    const a = +m[1]; const b = +m[2]; const y = +m[3];
+    const a = +m[1]!; const b = +m[2]!; const y = +m[3]!;
     if (a > 12 && b <= 12) return isoDate(y, b, a) ?? s; // D/M/YYYY
     if (b > 12 && a <= 12) return isoDate(y, a, b) ?? s; // M/D/YYYY
     if (a === b) return isoDate(y, a, b) ?? s;           // same either way

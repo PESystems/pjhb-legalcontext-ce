@@ -21,6 +21,7 @@ import { registerDocumentAnalysisTools } from './documentAnalysisTool';
 import { registerLegalResearchTools } from './legalResearchTool';
 import { registerDocumentSearchTools } from './documentSearchTool';
 import { registerRagQueryTool } from './ragQueryTool'; // This is now our enhanced implementation
+import { registerSettlementCalculatorTools } from './settlementCalculatorTool'; // PJHB Pass 7 calculator-first MVP
 import { logger } from '../logger';
 
 /**
@@ -35,6 +36,7 @@ export function registerTools(server: McpServer): void {
   registerLegalResearchTools(server);
   registerDocumentSearchTools(server);
   registerRagQueryTool(server); // Enhanced implementation with improved legal specific features
+  registerSettlementCalculatorTools(server); // PJHB Pass 7 calculator-first MVP
 
   logger.info('All MCP tools registered successfully');
 }
